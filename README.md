@@ -1,5 +1,9 @@
 # gate-run
 
+<p align="center">
+  <img src="assets/banner.svg" width="940" alt="A diff enters the review gate; APPROVED ships it to origin, REVISE blocks the push and the diff returns">
+</p>
+
 Rust edge tools for gated git workflows — one binary per problem, std-only,
 zero dependencies.
 
