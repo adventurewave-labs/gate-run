@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="230" viewBox="0 0 940 230" role="img" aria-label="gate-run: a diff enters the review gate; on APPROVED it ships to origin, on REVISE the push is blocked and the diff returns">
+  <!-- gate-run banner — the push runs inside the verdict.
+       Two-phase 8s SMIL loop: APPROVED ships (0-62%), REVISE blocks (62-100%).
+       All text sits inside titled panels; frame 0 shows the diff leaving the box. -->
+
+  <rect x="0" y="0" width="940" height="230" rx="12" fill="#0d1117"/>
+
+  <!-- title panel -->
+  <rect x="24" y="20" width="430" height="52" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="40" y="42" font-family="ui-monospace, Menlo, monospace" font-size="19" font-weight="bold" fill="#e6edf3">gate-run</text>
+  <text x="132" y="42" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#8b949e">rust edge tools for gated flows</text>
+  <text x="40" y="62" font-family="ui-monospace, Menlo, monospace" font-size="13" fill="#58a6ff">the push runs inside the verdict</text>
+
+  <!-- phase caption panel (top right) -->
+  <rect x="742" y="20" width="174" height="52" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="758" y="42" font-family="ui-monospace, Menlo, monospace" font-size="12" fill="#8b949e">phase</text>
+  <text x="758" y="62" font-family="ui-monospace, Menlo, monospace" font-size="14" font-weight="bold" fill="#e6edf3">
+    ship loop
+    <animate attributeName="opacity" values="1;1;0;0;1" keyTimes="0;0.60;0.64;0.96;1" dur="8s" repeatCount="indefinite"/>
+  </text>
+  <text x="758" y="62" font-family="ui-monospace, Menlo, monospace" font-size="14" font-weight="bold" fill="#f85149">
+    blocked push
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.60;0.64;0.96;1" dur="8s" repeatCount="indefinite"/>
+  </text>
+
+  <!-- diff source box -->
+  <rect x="56" y="128" width="80" height="46" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="96" y="156" font-family="ui-monospace, Menlo, monospace" font-size="14" fill="#e6edf3" text-anchor="middle">diff</text>
+
+  <!-- gate box (pulses with the verdict) -->
+  <rect x="392" y="106" width="156" height="90" rx="10" fill="#161b22" stroke="#30363d" stroke-width="2">
+    <animate attributeName="stroke"
+      values="#30363d;#58a6ff;#58a6ff;#30363d;#30363d;#f85149;#f85149;#30363d"
+      keyTimes="0;0.18;0.34;0.50;0.62;0.76;0.92;1" dur="8s" repeatCount="indefinite"/>
+  </rect>
+  <text x="470" y="142" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="bold" fill="#e6edf3" text-anchor="middle">GATE</text>
+  <text x="470" y="164" font-family="ui-monospace, Menlo, monospace" font-size="12" fill="#8b949e" text-anchor="middle">exit 0 ships</text>
+  <text x="470" y="182" font-family="ui-monospace, Menlo, monospace" font-size="12" fill="#8b949e" text-anchor="middle">anything else</text>
+
+  <!-- verdict texts (inside the gate box, one visible per phase) -->
+  <text x="470" y="96" font-family="ui-monospace, Menlo, monospace" font-size="13" font-weight="bold" fill="#3fb950" text-anchor="middle">APPROVED — push fires
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.30;0.34;0.52;0.58;1" dur="8s" repeatCount="indefinite"/>
+  </text>
+  <text x="470" y="96" font-family="ui-monospace, Menlo, monospace" font-size="13" font-weight="bold" fill="#f85149" text-anchor="middle">REVISE — push blocked
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.76;0.80;0.90;0.96;1" dur="8s" repeatCount="indefinite"/>
+  </text>
+
+  <!-- origin box (flashes green on arrival) -->
+  <rect x="792" y="128" width="92" height="46" rx="8" fill="#161b22" stroke="#30363d">
+    <animate attributeName="stroke" values="#30363d;#30363d;#3fb950;#3fb950;#30363d;#30363d"
+      keyTimes="0;0.50;0.56;0.62;0.68;1" dur="8s" repeatCount="indefinite"/>
+  </rect>
+  <text x="838" y="156" font-family="ui-monospace, Menlo, monospace" font-size="14" fill="#e6edf3" text-anchor="middle">origin</text>
+
+  <!-- rails -->
+  <line x1="136" y1="151" x2="392" y2="151" stroke="#30363d" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="548" y1="151" x2="792" y2="151" stroke="#30363d" stroke-width="2" stroke-dasharray="4 4">
+    <animate attributeName="stroke" values="#30363d;#30363d;#3fb950;#3fb950;#30363d;#30363d"
+      keyTimes="0;0.34;0.40;0.56;0.62;1" dur="8s" repeatCount="indefinite"/>
+  </line>
+
+  <!-- REVISE blocker on the push rail -->
+  <g stroke="#f85149" stroke-width="3" opacity="0">
+    <line x1="662" y1="139" x2="678" y2="163"/>
+    <line x1="678" y1="139" x2="662" y2="163"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.76;0.80;0.90;0.96;1" dur="8s" repeatCount="indefinite"/>
+  </g>
+
+  <!-- dot A: the diff that ships (APPROVED phase) -->
+  <circle r="7" fill="#58a6ff">
+    <animateMotion path="M 143 151 L 392 151 L 548 151 L 785 151"
+      keyPoints="0;0.335;0.335;0.67;1;1" keyTimes="0;0.16;0.32;0.50;0.58;1"
+      calcMode="linear" dur="8s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.58;0.62;1" dur="8s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- dot B: the diff that bounces (REVISE phase) -->
+  <circle r="7" fill="#f85149">
+    <animateMotion path="M 143 151 L 392 151"
+      keyPoints="0;0;1;0;0" keyTimes="0;0.62;0.76;0.92;1"
+      calcMode="linear" dur="8s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.62;0.64;0.92;0.96;1" dur="8s" repeatCount="indefinite"/>
+  </circle>
+</svg>
