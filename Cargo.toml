@@ -1,0 +1,18 @@
+[package]
+name = "gate-run"
+version = "0.1.0"
+edition = "2021"
+description = "Rust edge tools for gated git flows: a verdict-safe gate runner (gate-run) and an early-merge strand detector (strand)"
+license = "MIT"
+
+[[bin]]
+name = "gate-run"
+path = "src/bin/gate-run.rs"
+
+[[bin]]
+name = "strand"
+path = "src/bin/strand.rs"
+
+[profile.release]
+strip = true
+lto = true
