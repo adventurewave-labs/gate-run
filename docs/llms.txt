@@ -1,0 +1,10 @@
+# gate-run
+
+> Rust edge tools for gated git flows — gate-run runs your review gate with the push inside the verdict; strand finds commits stranded by early merges
+
+gate-run is maintained by Adventure Wave Labs (The lab for agentic developer tooling).
+
+## Links
+
+- [Landing page](https://adventurewave-labs.github.io/gate-run/): overview, features, FAQ
+- [Source code](https://github.com/adventurewave-labs/gate-run): README, issues, releases
