@@ -5,7 +5,7 @@
 </p>
 
 Rust edge tools for gated git workflows — one binary per problem, std-only,
-zero dependencies.
+zero dependencies. Docs: [adventurewave-labs.github.io/gate-run](https://adventurewave-labs.github.io/gate-run/).
 
 ## gate-run — the push runs inside the verdict
 
@@ -56,6 +56,19 @@ strand --base develop feat-x  # one branch, custom base
 - Read-only: prints stranded commits oldest-first with suggested
   cherry-pick rescue commands — printed, never executed. Exit 1 when
   stranding exists, so it can gate a nightly sweep. Needs git ≥ 2.38.
+
+## Install
+
+From source (Rust 1.70+, no external crates to fetch):
+
+```sh
+cargo install --git https://github.com/adventurewave-labs/gate-run
+# or: clone the repo and `cargo build --release`
+```
+
+Prebuilt binaries are attached to the
+[v0.1.0 release](https://github.com/adventurewave-labs/gate-run/releases/tag/v0.1.0)
+(macOS Apple Silicon, unsigned). A crates.io listing is pending.
 
 ## Build & test
 
