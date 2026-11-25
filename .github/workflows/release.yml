@@ -1,0 +1,142 @@
+name: Release binaries
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    env:
+      TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: "1.88.0"
+          targets: ${{ matrix.target }}
+
+      - name: Verify release version
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "gate-run") | .version')
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo version $version"
+            exit 1
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test and build both binaries
+        run: |
+          cargo test --locked --target "$TARGET"
+          cargo build --release --locked --target "$TARGET" --bins
+
+      - name: Package and smoke-test archive
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          mkdir -p dist
+          archive="gate-run-$TAG-$TARGET.tar.gz"
+          tar -czf "dist/$archive" -C "target/$TARGET/release" gate-run strand -C "$PWD" LICENSE
+          (
+            cd dist
+            shasum -a 256 "$archive" > "$archive.sha256"
+            shasum -a 256 -c "$archive.sha256"
+          )
+
+          smoke_dir=$(mktemp -d)
+          tar -xzf "dist/$archive" -C "$smoke_dir"
+          cd "$smoke_dir"
+          test -s LICENSE
+          ./gate-run --on-ok 'touch approved' -- true
+          test -f approved
+          status=0
+          ./gate-run --on-ok 'touch rejected' -- sh -c 'exit 7' || status=$?
+          test "$status" -eq 7
+          test ! -e rejected
+
+          git init -b main
+          git -c user.name=CI -c user.email=ci@example.com commit --allow-empty -m initial
+          git branch smoke
+          ./strand --all
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gate-run-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: gate-run-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach archives and checksums
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: gate-run ${{ github.ref_name }}
+          body: |
+            Prebuilt downloads for x86-64 and ARM64 Linux (GNU libc), macOS Apple Silicon, and macOS Intel.
+            Each archive contains both gate-run and strand and was built from Cargo.lock with Rust 1.88.0.
+            Verify the archive with the accompanying SHA-256 checksum before extracting.
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: artifacts/*
+          fail_on_unmatched_files: true
+
+      - name: Verify public release downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir downloaded
+          for original in artifacts/*; do
+            asset=$(basename "$original")
+            curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+              --output "downloaded/$asset" \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$asset"
+            cmp "$original" "downloaded/$asset"
+          done
+          cd downloaded
+          shasum -a 256 -c ./*.sha256
