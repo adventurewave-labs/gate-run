@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p dist
           archive="gate-run-$TAG-$TARGET.tar.gz"
-          tar -C "target/$TARGET/release" -czf "dist/$archive" gate-run strand
+          tar -czf "dist/$archive" -C "target/$TARGET/release" gate-run strand -C "$PWD" LICENSE
           (
             cd dist
             shasum -a 256 "$archive" > "$archive.sha256"
@@ -78,6 +78,7 @@ jobs:
           smoke_dir=$(mktemp -d)
           tar -xzf "dist/$archive" -C "$smoke_dir"
           cd "$smoke_dir"
+          test -s LICENSE
           ./gate-run --on-ok 'touch approved' -- true
           test -f approved
           status=0
