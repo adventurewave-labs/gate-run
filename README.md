@@ -59,22 +59,31 @@ strand --base develop feat-x  # one branch, custom base
 
 ## Install
 
-From source (Rust 1.70+, no external crates to fetch):
+Starting with v0.1.1, [GitHub releases](https://github.com/adventurewave-labs/gate-run/releases)
+provide archives for x86-64 and ARM64 Linux (GNU libc) and macOS (Apple Silicon
+and Intel). Each archive contains both `gate-run` and `strand`. Download the
+archive and its matching `.sha256` file. For example, on Apple Silicon:
 
 ```sh
-cargo install --git https://github.com/adventurewave-labs/gate-run
-# or: clone the repo and `cargo build --release`
+shasum -a 256 -c gate-run-v0.1.1-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf gate-run-v0.1.1-aarch64-apple-darwin.tar.gz
+mkdir -p "$HOME/.local/bin"
+install -m 755 gate-run strand "$HOME/.local/bin/"
 ```
 
-Prebuilt binaries are attached to the
-[v0.1.0 release](https://github.com/adventurewave-labs/gate-run/releases/tag/v0.1.0)
-(macOS Apple Silicon, unsigned). A crates.io listing is pending.
+Add `$HOME/.local/bin` to `PATH` if needed. `strand` requires Git 2.38 or newer.
+
+To install from source (Rust 1.70+, no external crates to fetch):
+
+```sh
+cargo install --locked --git https://github.com/adventurewave-labs/gate-run
+```
 
 ## Build & test
 
 ```sh
-cargo test
-cargo build --release
+cargo test --locked
+cargo build --release --locked
 ```
 
 No external crates. Rust 1.70+.
