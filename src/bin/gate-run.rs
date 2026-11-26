@@ -1,20 +1,18 @@
 //! gate-run — run a gate, then make the verdict impossible to pipe away.
 //!
-//! A review gate that exits 0 only when shipping is allowed (turbo-flow's
-//! rig-lite gate.sh, your own script) has one job: its exit code IS the
-//! decision. But a shell pipe eats that code (`gate | tail && push` ships a
-//! rejected diff). gate-run moves the follow-up action inside the process
-//! that holds the verdict, so even piping gate-run's own output cannot
-//! trigger the push on a rejection.
+//! The rig's gates (review.sh, rig-lite/gate.sh) already have a strict exit
+//! contract. Every "pushed during REVISE" incident came from a shell pipe
+//! eating that code (`gate | tail && push`). gate-run moves the follow-up
+//! action inside the process that holds the verdict, so even piping
+//! gate-run's own output cannot trigger the push on a REVISE.
 
 use std::process::{Command, ExitCode, Stdio};
 
 const USAGE: &str = "\
 gate-run — run a gate and keep its verdict un-maskable.
 
-gate-run assumes exactly one thing about your gate: exit 0 means allowed to
-ship. (turbo-flow's gate.sh contract for reference: 0 APPROVED · 1 REVISE ·
-2 error · 4 round cap.)
+Gate exit contract (review.sh / rig-lite/gate.sh):
+  0 = APPROVED · 1 = REVISE · 2 = error · 3 = selftest failure · 4 = ownership refusal
 
 USAGE:
   gate-run [--on-ok CMD] [--on-fail CMD] -- <gate command...>
@@ -24,7 +22,7 @@ USAGE:
   --             the gate command and its arguments (required)
 
 Example:
-  gate-run --on-ok 'git push' -- ./gate.sh --base main
+  gate-run --on-ok 'git push origin HEAD' -- ~/rig/scripts/review.sh --base main
 
 Exit: the gate's exit code (or the --on-ok command's) · 64 = bad usage · 127 = gate command unusable
 ";
