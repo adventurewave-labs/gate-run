@@ -5,18 +5,14 @@
 //! commits become unreachable from main and invisible to every dashboard.
 //! strand lists them and prints the rescue command; it never touches the repo.
 //!
-//! Detection is content-based, not patch-id-only:
-//! a web-UI merge lands as a merge commit or a squash, neither preserves the
+//! Detection is content-based, not patch-id-only (gates r1+r2 on PR #93): a
+//! web-UI merge lands as a merge commit or a squash, neither preserves the
 //! branch's individual patch-ids, and the squash's tree only equals the
 //! branch's when main stood still since the fork. The sound evidence that
-//! "base contains the branch up to commit P" is `git merge-tree --write-tree
-//! --merge-base=<fork> base P` producing exactly tree(base) — P adds nothing
-//! to base. No pathspecs are involved, so quoting, non-ASCII paths, and the
-//! caller's cwd cannot fake a match. A merge-committed P is additionally
-//! proven by reachability. Patch-ids are only a fallback for the
-//! fully-merged-but-not-by-sha case. Known conservative limit: if base
-//! RE-EDITS a lane path after merging it, containment fails and the lane
-//! reads UNMERGED (a miss, never a false "merged").
+//! "base contains the branch up to commit P" is cumulative containment:
+//! every path changed since the fork has the same content in base as at P.
+//! A merge-committed P is additionally proven by reachability. Patch-ids are
+//! only a fallback for the fully-merged-but-not-by-sha case.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -117,6 +113,12 @@ fn patch_id(repo: &Path, sha: &str) -> Result<Option<String>, String> {
         .write_all(&diff.stdout)
         .map_err(|e| format!("patch-id stdin failed: {e}"))?;
     let out = child.wait_with_output().map_err(|e| format!("patch-id failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git patch-id exited {} — refusing to classify on a failed probe",
+            out.status
+        ));
+    }
     let line = String::from_utf8_lossy(&out.stdout);
     let id = line.split_whitespace().next().map(str::to_string);
     Ok(id)
@@ -163,34 +165,49 @@ fn classify(repo: &Path, base: &str, branch: &str) -> Result<Class, String> {
         ));
     }
 
-    // Cumulative content containment: merging P onto
-    // base from the fork must reproduce base's tree exactly — P adds nothing.
-    // One merge-tree call, no pathspecs: quoting, non-ASCII paths, and the
-    // caller's cwd cannot fake a match. Conflicts (exit 1) = not contained.
-    let base_tree = git(repo, &["rev-parse", &format!("{base}^{{tree}}")])?
-        .trim()
-        .to_string();
+    // Cumulative content containment (gate r2 on PR #93): P's work is in base
+    // iff every path changed since the fork has the SAME content in base as at
+    // P — `git diff --quiet P base -- <paths>` empty. This holds even when
+    // base moved after the fork (squash lands on a newer main), which
+    // tree-equality and per-commit patch-ids both miss. Measured from the
+    // fork, so a lone later hot-pick cannot fake partial containment.
     let contains_up_to = |p: &str| -> Result<bool, String> {
         if git_ok(repo, &["merge-base", "--is-ancestor", p, base])? {
             return Ok(true); // merge-commit case: P itself is reachable
         }
+        // -z: NUL-delimited. --name-only's default output QUOTES filenames with
+        // tabs/newlines/non-ASCII; passing a quoted string back as a pathspec
+        // matches nothing, and `diff --quiet` then succeeds on UNMERGED work.
+        // --no-renames: with rename detection ON, a rename supplies only the
+        // NEW side; if base kept the old file too, containment would pass on
+        // unmerged work. Both sides enumerate as separate paths.
+        let diff_out = git(repo, &["diff", "-z", "--no-renames", "--name-only", &fork, p])?;
+        let paths: Vec<&str> = diff_out
+            .split('\0')
+            .filter(|l| !l.is_empty())
+            .collect();
+        if paths.is_empty() {
+            return Ok(false);
+        }
+        // raw-byte filenames decode lossily (U+FFFD); a phantom path could
+        // diff empty and read unmerged work as merged. Refuse to classify.
+        if paths.iter().any(|p| p.contains('\u{FFFD}')) {
+            return Err("non-UTF-8 filename in the changed set — containment unprovable, refusing (fail closed)".into());
+        }
+        let mut args = vec!["diff", "--quiet", p, base, "--"];
+        args.extend(paths);
         let out = Command::new("git")
+            .env("GIT_LITERAL_PATHSPECS", "1") // odd names are names, never globs
             .arg("-C")
-            .arg(repo)
-            .args(["merge-tree", "--write-tree", "--merge-base", &fork, base, p])
+            // the TRUE repo root: pathspecs are repo-root-relative, and
+            // canonicalize(".") would anchor at the SUBdirectory. Ask git.
+            .arg(git(repo, &["rev-parse", "--show-toplevel"])?.trim().to_string())
+            .args(&args)
             .output()
             .map_err(|e| format!("cannot run git: {e}"))?;
         match out.status.code() {
-            Some(0) => {
-                let merged_tree = String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                Ok(!merged_tree.is_empty() && merged_tree == base_tree)
-            }
-            Some(1) => Ok(false), // merge conflicts: P's changes are not a subset of base's
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
             _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
         }
     };
@@ -206,38 +223,74 @@ fn classify(repo: &Path, base: &str, branch: &str) -> Result<Class, String> {
         }
     }
 
+    // fallback for the fully-merged-but-not-by-sha case: every own commit
+    // individually in base by containment or patch-id. Patch-ids are computed
+    // over the fork..base window only (bounded), and merge/root commits yield
+    // no patch (diff-tree -p prints nothing) — they simply never match.
+    let all_in_base = |c: &Commit| -> Result<bool, String> {
+        if contains_up_to(&c.sha)? {
+            return Ok(true);
+        }
+        match patch_id(repo, &c.sha)? {
+            Some(id) => {
+                for b in git(repo, &["rev-list", "--no-merges", &format!("{fork}..{base}")])?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                {
+                    if patch_id(repo, b)? == Some(id.clone()) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    };
+
     match merged_up_to {
         Some(idx) => {
             let stranded: Vec<Commit> = own[idx + 1..].to_vec();
             if stranded.is_empty() {
+                return Ok(Class::MergedByPatch);
+            }
+            // content containment stopped matching, but a commit whose patch
+            // is already IN base (e.g. cherry-picked, then base evolved the
+            // same file further) is NOT residue — check before declaring.
+            let mut real: Vec<Commit> = Vec::new();
+            for c in &stranded {
+                let mut already = false;
+                if let Some(id) = patch_id(repo, &c.sha)? {
+                    for b in git(repo, &["rev-list", "--no-merges", &format!("{fork}..{base}")])?
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                    {
+                        if patch_id(repo, b)? == Some(id.clone()) {
+                            already = true;
+                            break;
+                        }
+                    }
+                }
+                // a commit whose patch-id can't be established stays in the
+                // residue list — reporting it is safe, dropping it silently is not
+                if !already {
+                    real.push(c.clone());
+                }
+            }
+            if real.is_empty() {
                 Ok(Class::MergedByPatch)
             } else {
-                Ok(Class::EarlyMergeResidue(stranded))
+                Ok(Class::EarlyMergeResidue(real))
             }
         }
         None => {
             if own.is_empty() {
                 return Ok(Class::Merged);
             }
-            // fallback for fully-merged-but-not-by-sha: every own commit in
-            // base by containment or patch-id. Base patch-ids computed ONCE
-            // over the bounded fork..base window; merge/root commits yield no
-            // patch (diff-tree -p prints nothing) and simply never match.
-            let mut base_patch_set: HashSet<String> = HashSet::new();
-            for b in git(repo, &["rev-list", "--no-merges", &format!("{fork}..{base}")])?
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-            {
-                if let Some(id) = patch_id(repo, b)? {
-                    base_patch_set.insert(id);
-                }
-            }
             let mut every = true;
             for c in &own {
-                let hit = contains_up_to(&c.sha)?
-                    || patch_id(repo, &c.sha)?.map_or(false, |id| base_patch_set.contains(&id));
-                if !hit {
+                if !all_in_base(c)? {
                     every = false;
                     break;
                 }
@@ -275,8 +328,9 @@ fn report(base: &str, branch: &str, class: &Class) -> bool {
             for c in stranded {
                 println!("  {branch}  {}  {}", &c.sha[..8.min(c.sha.len())], c.subject);
             }
+            let shq = |v: &str| format!("'{}'", v.replace('\'', "'\\''"));
             println!("  rescue (review first, then run by hand):");
-            println!("    git checkout -b rescue/{branch} {base}");
+            println!("    git checkout -b rescue/{} {}", shq(&branch), shq(base));
             for c in stranded {
                 println!("    git cherry-pick {}", c.sha);
             }
@@ -318,21 +372,6 @@ fn main() -> ExitCode {
     if let Err(e) = git(&repo, &["rev-parse", "--git-dir"]) {
         eprintln!("strand: not inside a git repository ({e})");
         return ExitCode::from(2);
-    }
-    // containment uses `git merge-tree --write-tree` (git >= 2.38) — fail
-    // closed with a clear message rather than mis-classifying on old git
-    let version = git(&repo, &["--version"]).unwrap_or_default();
-    let minor: Option<u32> = version
-        .split_whitespace()
-        .nth(2)
-        .and_then(|v| v.split('.').nth(1))
-        .and_then(|m| m.parse().ok());
-    match minor {
-        Some(m) if m >= 38 => {}
-        _ => {
-            eprintln!("strand: git >= 2.38 required (merge-tree --write-tree); found: {}", version.trim());
-            return ExitCode::from(2);
-        }
     }
     if let Err(e) = git(&repo, &["rev-parse", "--verify", "-q", &format!("{base}^{{commit}}")]) {
         eprintln!("strand: unknown base ref '{base}' ({e})");

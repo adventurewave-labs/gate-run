@@ -46,13 +46,11 @@ strand --base develop feat-x  # one branch, custom base
 - Classifies each branch: `MERGED` (safe to delete) · `MERGED (patch-equiv)`
   · `EARLY-MERGE RESIDUE` (stranded commits — the incident signature) ·
   `UNMERGED` (a normal working branch).
-- Detection is content-based: a web-UI merge lands as a merge commit or a
-  squash, neither of which preserves patch-ids, and the squash's tree only
-  matches the branch's when the main line stood still since the fork. strand
-  proves "the main line contains the branch up to commit P" with
-  `git merge-tree` — correct for merge commits AND squashes on a moving main
-  line, order-aware (a later hotfix picked into the main line does not fake
-  a partial merge), and immune to non-ASCII paths and subdirectory cwds.
+- For each possible partial merge, `strand` checks whether the branch commit
+  is reachable from the base or the base matches its content at every path
+  changed since the fork. This handles merge commits and squashes on a moving
+  main line. A later hotfix cherry-picked into the base cannot by itself make
+  a branch look partially merged. Failed Git probes stop classification.
 - Read-only: prints stranded commits oldest-first with suggested
   cherry-pick rescue commands — printed, never executed. Exit 1 when
   stranding exists, so it can gate a nightly sweep. Needs git ≥ 2.38.
@@ -91,3 +89,13 @@ No external crates. Rust 1.70+.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Source and releases
+
+The Rust source files and integration tests are generated from
+`rust-utils/utils/` in the canonical `marcuspat/turbo-rig` repository, which
+also supplies the Turbo Rig kit. Send source fixes upstream. Maintainers
+run `scripts/export-gate-run.sh` from canonical Turbo Rig before preparing
+a release here. The release workflow verifies the source snapshot against
+`SOURCE-SHA256` before building. The snapshot is committed here so GitHub
+builds and `cargo install --git` work without access to the canonical repo.

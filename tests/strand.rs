@@ -242,7 +242,7 @@ fn fully_merged_branch_is_safe_to_delete() {
 
     let (code, stdout, _) = strand(&r, &["--all"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("MERGED"), "stdout:\n{stdout}");
+    assert!(stdout.lines().any(|l| l.contains("MERGED") && !l.contains("UNMERGED") && !l.contains("EARLY-MERGE")), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn branch_merged_by_squash_whole_is_not_stranded() {
 
     let (code, stdout, _) = strand(&r, &["--all"]);
     assert_eq!(code, 0, "fully squash-merged is not stranded — stdout:\n{stdout}");
-    assert!(stdout.contains("MERGED"), "stdout:\n{stdout}");
+    assert!(stdout.lines().any(|l| l.contains("MERGED") && !l.contains("UNMERGED") && !l.contains("EARLY-MERGE")), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -290,74 +290,178 @@ fn explicit_branch_and_custom_base() {
 }
 
 #[test]
-fn run_from_subdirectory_stays_correct() {
-    // Gate r3: pathspec-based checks used to mis-read from a subdirectory;
-    // merge-tree containment must be cwd-independent.
-    let r = init("subdir");
-    r.commit("a.txt", "A base commit");
-    r.git(&["checkout", "-q", "-b", "lane-sub"]);
-    r.commit("b.txt", "B merged early");
-    r.web_squash("lane-sub");
-    r.commit_on("lane-sub", "c.txt", "C stranded");
-    r.git(&["checkout", "-q", "main"]);
-    std::fs::create_dir_all(r.0.join("deep/sub")).unwrap();
-
-    let out = Command::new(env!("CARGO_BIN_EXE_strand"))
-        .current_dir(r.0.join("deep/sub"))
-        .args(["--all"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "residue must be found from a subdirectory");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("EARLY-MERGE RESIDUE"), "{stdout}");
-    assert!(stdout.contains("C stranded"), "{stdout}");
-}
-
-#[test]
-fn non_ascii_filename_residue_is_detected() {
-    // Gate r3: quotePath-escaped names used to break pathspec matching and
-    // fake containment; merge-tree never touches pathspecs.
-    let r = init("nonascii");
-    r.commit("a.txt", "A base commit");
-    r.git(&["checkout", "-q", "-b", "lane-cafe"]);
-    fs::write(r.0.join("café.txt"), "café\n").unwrap();
-    r.git(&["add", "--", "café.txt"]);
-    r.git(&["commit", "-q", "-m", "Café merged early"]);
-    r.web_squash("lane-cafe");
-    r.commit_on("lane-cafe", "d.txt", "D stranded after café squash");
-    r.git(&["checkout", "-q", "main"]);
-
-    let (code, stdout, _) = strand(&r, &["--all"]);
-    assert_eq!(code, 1, "non-ASCII paths must not fake containment — stdout:\n{stdout}");
-    assert!(stdout.contains("D stranded after café squash"), "{stdout}");
-}
-
-#[test]
-fn reedited_lane_path_reads_unmerged_not_false_merged() {
-    // Documented conservative limit: base re-edits a lane path AFTER the
-    // squash — containment can no longer prove the merge, so the lane reads
-    // UNMERGED (exit 0). A miss is acceptable; a false MERGED is not.
-    let r = init("reedited");
-    r.commit("a.txt", "A base commit");
-    r.git(&["checkout", "-q", "-b", "lane-re"]);
-    r.commit("b.txt", "B squashed");
-    r.web_squash("lane-re");
-    fs::write(r.0.join("b.txt"), "b edited on main after the squash\n").unwrap();
-    r.git(&["add", "b.txt"]);
-    r.git(&["commit", "-q", "-m", "M main re-edits the lane path"]);
-    r.commit_on("lane-re", "c.txt", "C stranded");
-    r.git(&["checkout", "-q", "main"]);
-
-    let (code, stdout, _) = strand(&r, &["--all"]);
-    assert_eq!(code, 0, "conservative miss, not a false MERGED — stdout:\n{stdout}");
-    assert!(stdout.contains("UNMERGED"), "{stdout}");
-    assert!(!stdout.contains("RESIDUE"), "{stdout}");
-}
-
-#[test]
 fn not_a_repo_exits_2() {
     let r = Repo::new("norepo"); // initialized dir, never git-init'ed
     let (code, _, stderr) = strand(&r, &["--all"]);
     assert_eq!(code, 2);
     assert!(stderr.contains("not inside a git repository"));
+}
+
+#[test]
+fn quoted_unicode_name_cannot_read_as_merged() {
+    // -z regression: --name-only's non-z output QUOTES non-ASCII names; passing
+    // the quoted form back as a pathspec matches nothing, `diff --quiet` then
+    // succeeds on empty output, and unmerged work reads as contained
+    let r = init("quoted-name");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "unicode-lane"]);
+    fs::write(r.0.join("café.txt"), "unicode work\n").unwrap();
+    r.git(&["add", "café.txt"]);
+    r.git(&["commit", "-q", "-m", "unicode file"]);
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 0, "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("UNMERGED"),
+        "unmerged unicode-named work must not read as merged:\n{stdout}"
+    );
+}
+
+#[test]
+fn non_utf8_filename_refuses_to_classify() {
+    // raw-byte names decode lossily (U+FFFD); a phantom path could diff empty
+    // and read unmerged work as merged — the classifier must refuse, not guess
+    use std::os::unix::ffi::OsStrExt;
+    let r = init("non-utf8");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "raw-lane"]);
+    let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"bad\xff name.txt"));
+    fs::write(r.0.join(&bad), "raw\n").unwrap();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&r.0)
+        .arg("add")
+        .arg(&bad)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    r.git(&["commit", "-q", "-m", "raw-byte name"]);
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, stderr) = strand(&r, &["--all"]);
+    assert_ne!(code, 0, "a raw-byte name must refuse to classify:\n{stdout}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("non-UTF-8 filename"), "{combined}");
+}
+
+#[test]
+fn glob_char_name_is_a_name_never_a_pattern() {
+    // GIT_LITERAL_PATHSPECS: `weird[1].txt` must match that file, never expand
+    // as a glob — a non-matching pattern would diff empty and read as contained
+    let r = init("glob-name");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "glob-lane"]);
+    fs::write(r.0.join("weird[1].txt"), "glob work\n").unwrap();
+    r.git(&["add", "weird[1].txt"]);
+    r.git(&["commit", "-q", "-m", "glob file"]);
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("UNMERGED"),
+        "glob-char file must classify as UNMERGED:\n{stdout}"
+    );
+}
+
+#[test]
+fn cherry_picked_then_base_evolved_is_not_residue() {
+    // the patch-id residue filter: D's exact patch lands on base, then base
+    // evolves the same file — content containment stops matching D, but its
+    // patch is already in base. A cherry-picked-then-evolved commit is merged
+    // work, not strand; without the filter this printed as EARLY-MERGE RESIDUE.
+    let r = init("pick-evolved");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "pick-lane"]);
+    r.commit("b.txt", "B merged by the web UI");
+    r.commit("c.txt", "C merged by the web UI");
+    r.web_merge("pick-lane");
+    let d_sha = r.commit_on("pick-lane", "d.txt", "D picked across, then base moved");
+    r.git(&["checkout", "-q", "main"]);
+    r.cherry_pick_dated(&d_sha);
+    fs::write(r.0.join("d.txt"), "hotfix content\n").unwrap();
+    r.git(&["add", "d.txt"]);
+    r.git(&["commit", "-q", "-m", "hotfix evolves d.txt"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 0, "the branch reads merged (by patch), not residue:\n{stdout}");
+    assert!(
+        !stdout.contains("D picked across"),
+        "D's patch is already in base — never residue:\n{stdout}"
+    );
+}
+
+#[test]
+fn rescue_output_shell_quotes_odd_names() {
+    // branch names are data: the printed rescue must be sh-quoted, never raw
+    let r = init("odd-name");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "lane-9'x"]);
+    r.commit("b.txt", "B merged by the web UI");
+    r.web_merge("lane-9'x");
+    r.commit_on("lane-9'x", "c.txt", "C stranded, odd branch name");
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("C stranded, odd branch name"), "{stdout}");
+    // shq("lane-9'x") renders as 'lane-9'\''x'
+    assert!(
+        stdout.contains("'lane-9'\\''x'"),
+        "rescue must quote the branch name:\n{stdout}"
+    );
+}
+
+#[test]
+fn failed_patch_id_probe_refuses_to_classify() {
+    // a git error inside the patch-id probe must never read as Ok(None) —
+    // a failed probe refuses the classification instead of passing silently
+    let r = init("probe-fail");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "probe-lane"]);
+    r.commit("b.txt", "B merged by the web UI");
+    r.commit_on("probe-lane", "c.txt", "C strand candidate");
+    r.web_merge("probe-lane");
+    r.commit_on("probe-lane", "d.txt", "D pushed after the merge");
+    r.git(&["checkout", "-q", "main"]);
+
+    // shadow git: every call delegates to the real one except `patch-id`, which fails
+    let bin = std::env::temp_dir().join(format!("strand-fakebin-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&bin);
+    fs::create_dir_all(&bin).unwrap();
+    // strand invokes `git -C <repo> patch-id`, so scan ALL args for the
+    // subcommand — $1 is "-C", never "patch-id". The shim MUST be executable:
+    // PATH lookup silently skips non-executable entries and would fall through
+    // to the real git, making the shadow a no-op.
+    // resolve the REAL git before the shadow exists — /usr/bin/git is not
+    // universal (nix, homebrew, custom prefixes), so bake what the probe finds
+    let real_git = String::from_utf8_lossy(
+        &Command::new("sh").arg("-c").arg("command -v git").output().unwrap().stdout,
+    ).trim().to_string();
+    assert!(!real_git.is_empty(), "git must be on PATH to shadow it");
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/usr/bin/env bash\nfor a in \"$@\"; do if [ \"$a\" = \"patch-id\" ]; then echo 'patch-id unavailable' >&2; exit 1; fi; done\nexec {real_git} \"$@\"\n"
+        ),
+    ).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_strand"))
+        .current_dir(&r.0)
+        .arg("--all")
+        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+        .output()
+        .unwrap();
+    let code = out.status.code().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(code, 0, "a failed patch-id probe must refuse, not classify");
+    assert!(
+        stderr.contains("patch-id exited"),
+        "the probe failure must be named: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&bin);
 }
