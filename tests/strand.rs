@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 struct Repo(PathBuf);
@@ -290,6 +290,69 @@ fn explicit_branch_and_custom_base() {
 }
 
 #[test]
+fn run_from_subdirectory_stays_correct() {
+    // Cumulative content containment must work below the repository root.
+    let r = init("subdir");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "lane-sub"]);
+    r.commit("b.txt", "B merged early");
+    r.web_squash("lane-sub");
+    r.commit_on("lane-sub", "c.txt", "C stranded");
+    r.git(&["checkout", "-q", "main"]);
+    std::fs::create_dir_all(r.0.join("deep/sub")).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_strand"))
+        .current_dir(r.0.join("deep/sub"))
+        .args(["--all"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "residue must be found from a subdirectory");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("EARLY-MERGE RESIDUE"), "{stdout}");
+    assert!(stdout.contains("C stranded"), "{stdout}");
+}
+
+#[test]
+fn non_ascii_filename_residue_is_detected() {
+    // Git paths can contain non-ASCII bytes and should be compared literally.
+    let r = init("nonascii");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "lane-cafe"]);
+    fs::write(r.0.join("café.txt"), "café\n").unwrap();
+    r.git(&["add", "--", "café.txt"]);
+    r.git(&["commit", "-q", "-m", "Café merged early"]);
+    r.web_squash("lane-cafe");
+    r.commit_on("lane-cafe", "d.txt", "D stranded after café squash");
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 1, "non-ASCII paths must not fake containment — stdout:\n{stdout}");
+    assert!(stdout.contains("D stranded after café squash"), "{stdout}");
+}
+
+#[test]
+fn reedited_lane_path_reads_unmerged_not_false_merged() {
+    // Documented conservative limit: base re-edits a lane path AFTER the
+    // squash — containment can no longer prove the merge, so the lane reads
+    // UNMERGED (exit 0). A miss is acceptable; a false MERGED is not.
+    let r = init("reedited");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "lane-re"]);
+    r.commit("b.txt", "B squashed");
+    r.web_squash("lane-re");
+    fs::write(r.0.join("b.txt"), "b edited on main after the squash\n").unwrap();
+    r.git(&["add", "b.txt"]);
+    r.git(&["commit", "-q", "-m", "M main re-edits the lane path"]);
+    r.commit_on("lane-re", "c.txt", "C stranded");
+    r.git(&["checkout", "-q", "main"]);
+
+    let (code, stdout, _) = strand(&r, &["--all"]);
+    assert_eq!(code, 0, "conservative miss, not a false MERGED — stdout:\n{stdout}");
+    assert!(stdout.contains("UNMERGED"), "{stdout}");
+    assert!(!stdout.contains("RESIDUE"), "{stdout}");
+}
+
+#[test]
 fn not_a_repo_exits_2() {
     let r = Repo::new("norepo"); // initialized dir, never git-init'ed
     let (code, _, stderr) = strand(&r, &["--all"]);
@@ -318,10 +381,9 @@ fn quoted_unicode_name_cannot_read_as_merged() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn non_utf8_filename_refuses_to_classify() {
-    // raw-byte names decode lossily (U+FFFD); a phantom path could diff empty
-    // and read unmerged work as merged — the classifier must refuse, not guess
+fn non_utf8_filename_is_classified_by_its_bytes() {
     use std::os::unix::ffi::OsStrExt;
     let r = init("non-utf8");
     r.commit("a.txt", "A base commit");
@@ -340,15 +402,13 @@ fn non_utf8_filename_refuses_to_classify() {
     r.git(&["checkout", "-q", "main"]);
 
     let (code, stdout, stderr) = strand(&r, &["--all"]);
-    assert_ne!(code, 0, "a raw-byte name must refuse to classify:\n{stdout}");
-    let combined = format!("{stdout}{stderr}");
-    assert!(combined.contains("non-UTF-8 filename"), "{combined}");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("UNMERGED"), "{stdout}");
 }
 
 #[test]
 fn glob_char_name_is_a_name_never_a_pattern() {
-    // GIT_LITERAL_PATHSPECS: `weird[1].txt` must match that file, never expand
-    // as a glob — a non-matching pattern would diff empty and read as contained
+    // Bracketed names are compared literally.
     let r = init("glob-name");
     r.commit("a.txt", "A base commit");
     r.git(&["checkout", "-q", "-b", "glob-lane"]);
@@ -464,4 +524,43 @@ fn failed_patch_id_probe_refuses_to_classify() {
         "the probe failure must be named: {stderr}"
     );
     let _ = fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn relative_diff_from_subdirectory_keeps_root_paths() {
+    let r = init("relative-diff");
+    r.commit("a.txt", "A base commit");
+    fs::create_dir(r.0.join("sub")).unwrap();
+    r.commit("sub/kept.txt", "Keep the subdirectory on main");
+    r.git(&["checkout", "-q", "-b", "relative-lane"]);
+    r.commit("sub/work.txt", "Unmerged subdirectory change");
+    r.commit("outside.txt", "Unmerged root change");
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["config", "diff.relative", "true"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_strand"))
+        .current_dir(r.0.join("sub"))
+        .arg("relative-lane")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.split_whitespace().any(|word| word == "UNMERGED"), "{stdout}");
+}
+
+#[test]
+fn reverted_cherry_pick_remains_residue() {
+    let r = init("reverted-pick");
+    r.commit("a.txt", "A base commit");
+    r.git(&["checkout", "-q", "-b", "reverted-lane"]);
+    r.commit("b.txt", "B merged early");
+    r.web_merge("reverted-lane");
+    let sha = r.commit_on("reverted-lane", "c.txt", "C picked then reverted");
+    r.git(&["checkout", "-q", "main"]);
+    r.cherry_pick_dated(&sha);
+    r.git(&["revert", "--no-edit", "HEAD"]);
+
+    let (code, stdout, stderr) = strand(&r, &["reverted-lane"]);
+    assert_eq!(code, 1, "{stdout}\n{stderr}");
+    assert!(stdout.contains("C picked then reverted"), "{stdout}");
 }

@@ -50,7 +50,9 @@ strand --base develop feat-x  # one branch, custom base
   is reachable from the base or the base matches its content at every path
   changed since the fork. This handles merge commits and squashes on a moving
   main line. A later hotfix cherry-picked into the base cannot by itself make
-  a branch look partially merged. Failed Git probes stop classification.
+  a branch look partially merged. Patch IDs account for cherry-picked changes
+  that later evolved, and an exact revert cancels a matching patch. Failed Git
+  probes stop classification.
 - Read-only: prints stranded commits oldest-first with suggested
   cherry-pick rescue commands — printed, never executed. Exit 1 when
   stranding exists, so it can gate a nightly sweep. Needs git ≥ 2.38.
@@ -96,6 +98,7 @@ The Rust source files and integration tests are generated from
 `rust-utils/utils/` in the canonical `marcuspat/turbo-rig` repository, which
 also supplies the Turbo Rig kit. Send source fixes upstream. Maintainers
 run `scripts/export-gate-run.sh` from canonical Turbo Rig before preparing
-a release here. The release workflow verifies the source snapshot against
-`SOURCE-SHA256` before building. The snapshot is committed here so GitHub
+a release here and compare the snapshot with canonical main before tagging.
+The workflow checks the four committed files against `SOURCE-SHA256` before
+building. The snapshot is committed here so GitHub
 builds and `cargo install --git` work without access to the canonical repo.

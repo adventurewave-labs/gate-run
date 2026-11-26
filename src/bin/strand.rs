@@ -5,14 +5,10 @@
 //! commits become unreachable from main and invisible to every dashboard.
 //! strand lists them and prints the rescue command; it never touches the repo.
 //!
-//! Detection is content-based, not patch-id-only (gates r1+r2 on PR #93): a
-//! web-UI merge lands as a merge commit or a squash, neither preserves the
-//! branch's individual patch-ids, and the squash's tree only equals the
-//! branch's when main stood still since the fork. The sound evidence that
-//! "base contains the branch up to commit P" is cumulative containment:
-//! every path changed since the fork has the same content in base as at P.
-//! A merge-committed P is additionally proven by reachability. Patch-ids are
-//! only a fallback for the fully-merged-but-not-by-sha case.
+//! A branch prefix is present in base if its commit is reachable or base
+//! matches its content at every path changed in the prefix. Compare paths as
+//! raw bytes so filenames and the working directory cannot change the result.
+//! Patch IDs supplement that proof for cherry-picked changes that evolved.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -87,13 +83,30 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<bool, String> {
     }
 }
 
-fn patch_id(repo: &Path, sha: &str) -> Result<Option<String>, String> {
-    let diff = Command::new("git")
+fn changed_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<u8>, String> {
+    let out = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["diff-tree", "-p", sha])
+        .args([
+            "diff", "--no-relative", "--no-renames", "--ignore-submodules=none",
+            "--name-only", "-z", from, to, "--",
+        ])
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn patch_id(repo: &Path, sha: &str, reverse: bool) -> Result<Option<String>, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).args(["diff-tree", "-p", "--no-relative", "--no-prefix"]);
+    if reverse {
+        command.arg("-R");
+    }
+    let diff = command.arg(sha).output().map_err(|e| format!("cannot run git: {e}"))?;
     if !diff.status.success() {
         return Err(String::from_utf8_lossy(&diff.stderr).trim().to_string());
     }
@@ -165,142 +178,73 @@ fn classify(repo: &Path, base: &str, branch: &str) -> Result<Class, String> {
         ));
     }
 
-    // Cumulative content containment (gate r2 on PR #93): P's work is in base
-    // iff every path changed since the fork has the SAME content in base as at
-    // P — `git diff --quiet P base -- <paths>` empty. This holds even when
-    // base moved after the fork (squash lands on a newer main), which
-    // tree-equality and per-commit patch-ids both miss. Measured from the
-    // fork, so a lone later hot-pick cannot fake partial containment.
-    let contains_up_to = |p: &str| -> Result<bool, String> {
-        if git_ok(repo, &["merge-base", "--is-ancestor", p, base])? {
-            return Ok(true); // merge-commit case: P itself is reachable
+    if own.is_empty() {
+        return Ok(Class::Merged);
+    }
+
+    // A prefix is contained when none of the paths it changed from the fork
+    // still differ from base. Compare the two NUL-delimited path lists instead
+    // of passing filenames back to Git as pathspecs.
+    let contains_up_to = |sha: &str| -> Result<bool, String> {
+        if git_ok(repo, &["merge-base", "--is-ancestor", sha, base])? {
+            return Ok(true);
         }
-        // -z: NUL-delimited. --name-only's default output QUOTES filenames with
-        // tabs/newlines/non-ASCII; passing a quoted string back as a pathspec
-        // matches nothing, and `diff --quiet` then succeeds on UNMERGED work.
-        // --no-renames: with rename detection ON, a rename supplies only the
-        // NEW side; if base kept the old file too, containment would pass on
-        // unmerged work. Both sides enumerate as separate paths.
-        let diff_out = git(repo, &["diff", "-z", "--no-renames", "--name-only", &fork, p])?;
-        let paths: Vec<&str> = diff_out
-            .split('\0')
-            .filter(|l| !l.is_empty())
-            .collect();
-        if paths.is_empty() {
+        let prefix = changed_paths(repo, &fork, sha)?;
+        if prefix.is_empty() {
             return Ok(false);
         }
-        // raw-byte filenames decode lossily (U+FFFD); a phantom path could
-        // diff empty and read unmerged work as merged. Refuse to classify.
-        if paths.iter().any(|p| p.contains('\u{FFFD}')) {
-            return Err("non-UTF-8 filename in the changed set — containment unprovable, refusing (fail closed)".into());
-        }
-        let mut args = vec!["diff", "--quiet", p, base, "--"];
-        args.extend(paths);
-        let out = Command::new("git")
-            .env("GIT_LITERAL_PATHSPECS", "1") // odd names are names, never globs
-            .arg("-C")
-            // the TRUE repo root: pathspecs are repo-root-relative, and
-            // canonicalize(".") would anchor at the SUBdirectory. Ask git.
-            .arg(git(repo, &["rev-parse", "--show-toplevel"])?.trim().to_string())
-            .args(&args)
-            .output()
-            .map_err(|e| format!("cannot run git: {e}"))?;
-        match out.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        }
+        let prefix_paths: HashSet<&[u8]> = prefix
+            .split(|&byte| byte == 0)
+            .filter(|path| !path.is_empty())
+            .collect();
+        Ok(!changed_paths(repo, sha, base)?
+            .split(|&byte| byte == 0)
+            .any(|path| prefix_paths.contains(path)))
     };
 
-    // merged_up_to = NEWEST own commit P contained in base (scan newest-first,
-    // stop at the first hit). Order matters: a LATER commit hot-picked into
-    // base must not make the branch look partially merged.
-    let mut merged_up_to: Option<usize> = None; // index into `own`
-    for (i, c) in own.iter().enumerate().rev() {
-        if contains_up_to(&c.sha)? {
-            merged_up_to = Some(i);
+    // A later cherry-pick cannot make a noncontiguous prefix look merged.
+    let mut merged_up_to = None;
+    for (index, commit) in own.iter().enumerate().rev() {
+        if contains_up_to(&commit.sha)? {
+            merged_up_to = Some(index);
             break;
         }
     }
+    let pending = &own[merged_up_to.map_or(0, |index| index + 1)..];
+    if pending.is_empty() {
+        return Ok(Class::MergedByPatch);
+    }
 
-    // fallback for the fully-merged-but-not-by-sha case: every own commit
-    // individually in base by containment or patch-id. Patch-ids are computed
-    // over the fork..base window only (bounded), and merge/root commits yield
-    // no patch (diff-tree -p prints nothing) — they simply never match.
-    let all_in_base = |c: &Commit| -> Result<bool, String> {
-        if contains_up_to(&c.sha)? {
-            return Ok(true);
+    // Compute patch evidence once in ancestry order. An exact revert cancels
+    // an earlier matching patch, while later unrelated edits leave it applied.
+    let mut base_patches = HashSet::new();
+    let base_history = git(
+        repo,
+        &["rev-list", "--no-merges", "--reverse", "--topo-order", &format!("{fork}..{base}")],
+    )?;
+    for sha in base_history.lines() {
+        if let Some(id) = patch_id(repo, sha, true)? {
+            base_patches.remove(&id);
         }
-        match patch_id(repo, &c.sha)? {
-            Some(id) => {
-                for b in git(repo, &["rev-list", "--no-merges", &format!("{fork}..{base}")])?
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                {
-                    if patch_id(repo, b)? == Some(id.clone()) {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
-            None => Ok(false),
+        if let Some(id) = patch_id(repo, sha, false)? {
+            base_patches.insert(id);
         }
-    };
+    }
 
-    match merged_up_to {
-        Some(idx) => {
-            let stranded: Vec<Commit> = own[idx + 1..].to_vec();
-            if stranded.is_empty() {
-                return Ok(Class::MergedByPatch);
-            }
-            // content containment stopped matching, but a commit whose patch
-            // is already IN base (e.g. cherry-picked, then base evolved the
-            // same file further) is NOT residue — check before declaring.
-            let mut real: Vec<Commit> = Vec::new();
-            for c in &stranded {
-                let mut already = false;
-                if let Some(id) = patch_id(repo, &c.sha)? {
-                    for b in git(repo, &["rev-list", "--no-merges", &format!("{fork}..{base}")])?
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                    {
-                        if patch_id(repo, b)? == Some(id.clone()) {
-                            already = true;
-                            break;
-                        }
-                    }
-                }
-                // a commit whose patch-id can't be established stays in the
-                // residue list — reporting it is safe, dropping it silently is not
-                if !already {
-                    real.push(c.clone());
-                }
-            }
-            if real.is_empty() {
-                Ok(Class::MergedByPatch)
-            } else {
-                Ok(Class::EarlyMergeResidue(real))
-            }
+    let mut unmatched = Vec::new();
+    for commit in pending {
+        let applied = patch_id(repo, &commit.sha, false)?
+            .map_or(false, |id| base_patches.contains(&id));
+        if !applied {
+            unmatched.push(commit.clone());
         }
-        None => {
-            if own.is_empty() {
-                return Ok(Class::Merged);
-            }
-            let mut every = true;
-            for c in &own {
-                if !all_in_base(c)? {
-                    every = false;
-                    break;
-                }
-            }
-            if every {
-                Ok(Class::MergedByPatch)
-            } else {
-                Ok(Class::Unmerged(own.len()))
-            }
-        }
+    }
+    if unmatched.is_empty() {
+        Ok(Class::MergedByPatch)
+    } else if merged_up_to.is_some() {
+        Ok(Class::EarlyMergeResidue(unmatched))
+    } else {
+        Ok(Class::Unmerged(own.len()))
     }
 }
 
