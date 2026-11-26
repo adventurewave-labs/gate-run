@@ -65,8 +65,8 @@ and Intel). Each archive contains both `gate-run` and `strand`. Download the
 archive and its matching `.sha256` file. For example, on Apple Silicon:
 
 ```sh
-shasum -a 256 -c gate-run-v0.1.1-aarch64-apple-darwin.tar.gz.sha256
-tar -xzf gate-run-v0.1.1-aarch64-apple-darwin.tar.gz
+shasum -a 256 -c gate-run-v0.1.2-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf gate-run-v0.1.2-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
 install -m 755 gate-run strand "$HOME/.local/bin/"
 ```
