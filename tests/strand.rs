@@ -473,6 +473,7 @@ fn rescue_output_shell_quotes_odd_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn failed_patch_id_probe_refuses_to_classify() {
     // a git error inside the patch-id probe must never read as Ok(None) —
@@ -500,10 +501,11 @@ fn failed_patch_id_probe_refuses_to_classify() {
         &Command::new("sh").arg("-c").arg("command -v git").output().unwrap().stdout,
     ).trim().to_string();
     assert!(!real_git.is_empty(), "git must be on PATH to shadow it");
+    // Drain the input so the failure is reported by the child exit status.
     fs::write(
         bin.join("git"),
         format!(
-            "#!/usr/bin/env bash\nfor a in \"$@\"; do if [ \"$a\" = \"patch-id\" ]; then echo 'patch-id unavailable' >&2; exit 1; fi; done\nexec {real_git} \"$@\"\n"
+            "#!/usr/bin/env bash\nfor a in \"$@\"; do if [ \"$a\" = \"patch-id\" ]; then cat >/dev/null; echo 'patch-id unavailable' >&2; exit 1; fi; done\nexec {real_git} \"$@\"\n"
         ),
     ).unwrap();
     {
