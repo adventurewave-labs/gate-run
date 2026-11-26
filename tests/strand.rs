@@ -404,6 +404,13 @@ fn non_utf8_filename_is_classified_by_its_bytes() {
     let (code, stdout, stderr) = strand(&r, &["--all"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("UNMERGED"), "{stdout}");
+
+    r.web_squash("raw-lane");
+    r.commit_on("raw-lane", "after.txt", "Stranded after raw-path squash");
+    r.git(&["checkout", "-q", "main"]);
+    let (code, stdout, stderr) = strand(&r, &["raw-lane"]);
+    assert_eq!(code, 1, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Stranded after raw-path squash"), "{stdout}");
 }
 
 #[test]
@@ -535,8 +542,9 @@ fn relative_diff_from_subdirectory_keeps_root_paths() {
     fs::create_dir(r.0.join("sub")).unwrap();
     r.commit("sub/kept.txt", "Keep the subdirectory on main");
     r.git(&["checkout", "-q", "-b", "relative-lane"]);
-    r.commit("sub/work.txt", "Unmerged subdirectory change");
-    r.commit("outside.txt", "Unmerged root change");
+    r.commit("sub/work.txt", "Squashed subdirectory change");
+    r.web_squash("relative-lane");
+    r.commit_on("relative-lane", "outside.txt", "Stranded root change");
     r.git(&["checkout", "-q", "main"]);
     r.git(&["config", "diff.relative", "true"]);
 
@@ -545,9 +553,10 @@ fn relative_diff_from_subdirectory_keeps_root_paths() {
         .arg("relative-lane")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.split_whitespace().any(|word| word == "UNMERGED"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stdout.contains("Stranded root change"), "{stdout}");
 }
 
 #[test]
